@@ -3,6 +3,8 @@
 
 A grounded customer-support agent for the VoiceOps capstone. It searches the supplied current policy documents, preserves section IDs, verifies callers before revealing order data, creates tickets for human-only decisions, and supports Gnani STT/TTS.
 
+Source code: [https://github.com/SaiRoshini-25/zentromart-voiceops](https://github.com/SaiRoshini-25/zentromart-voiceops)
+
 ## Setup
 
 ```powershell
