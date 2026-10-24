@@ -1,8 +1,162 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ZentroMart VoiceOps</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><main><header><span>ZENTROMART</span><h1>Support, with a human touch.</h1><p>AI-powered policy and order support</p></header>
-<section id="chat" aria-live="polite"><div class="bot">Hello! I'm ZentroMart's AI assistant. How can I help?</div></section>
-<form id="form"><input id="message" placeholder="Ask about an order, refund, or return" autocomplete="off"><button>Send</button></form>
-<div class="voice"><button id="record" type="button">Start voice message</button><input id="audio-file" type="file" accept="audio/*" aria-label="Upload an audio message"><label>Listen <select id="stt-language" aria-label="Speech recognition language"><option value="en-IN">English / Hinglish (Latin script)</option><option value="bn-IN">Bengali</option><option value="gu-IN">Gujarati</option><option value="hi-IN">Hindi</option><option value="kn-IN">Kannada</option><option value="ml-IN">Malayalam</option><option value="mr-IN">Marathi</option><option value="pa-IN">Punjabi</option><option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option></select></label><label>Reply <select id="tts-language" aria-label="Speech output language"><option value="en-IN">English</option><option value="hi-en">Hinglish</option><option value="bn-IN">Bengali</option><option value="gu-IN">Gujarati</option><option value="hi-IN">Hindi</option><option value="kn-IN">Kannada</option><option value="ml-IN">Malayalam</option><option value="mr-IN">Marathi</option><option value="pa-IN">Punjabi</option><option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option></select></label><label>Voice <select id="tts-voice" aria-label="Gnani speech voice"><option value="Kaveri">Kaveri</option><option value="Trupti">Trupti</option><option value="Pranav">Pranav</option><option value="Shlok">Shlok</option></select></label></div>
-<button id="reset" class="link">Start new conversation</button></main><script src="/static/app.js"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111211">
+  <title>ZentroMart Support Desk</title>
+  <link rel="stylesheet" href="/static/style.css?v=20261024-9">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="ZentroMart support home">
+        <span class="brand-mark" aria-hidden="true">Z</span>
+        <span class="brand-name">ZENTRO<span>MART</span><small>SUPPORT DESK</small></span>
+      </a>
+
+      <div class="workspace-switcher">
+        <span class="workspace-icon" aria-hidden="true">ZM</span>
+        <span><strong>ZentroMart</strong><small>Customer care</small></span>
+        <span class="switcher-chevron" aria-hidden="true">⌄</span>
+      </div>
+
+      <p class="nav-caption">WORKSPACE</p>
+      <nav class="primary-nav">
+        <a href="#conversation" class="nav-item active" aria-current="page"><span class="nav-icon" aria-hidden="true">◉</span>Live support<span class="nav-count">1</span></a>
+        <span class="nav-item nav-unavailable" aria-disabled="true"><span class="nav-icon" aria-hidden="true">▤</span>Orders</span>
+        <span class="nav-item nav-unavailable" aria-disabled="true"><span class="nav-icon" aria-hidden="true">▧</span>Knowledge base</span>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="help-card">
+          <span class="help-card-icon" aria-hidden="true">?</span>
+          <strong>Need a hand?</strong>
+          <p>Our support team is here to help.</p>
+          <a href="#message">Contact support <span aria-hidden="true">↗</span></a>
+        </div>
+        <div class="profile">
+          <span class="profile-avatar" aria-hidden="true">G</span>
+          <span><strong>Guest session</strong><small>Secure conversation</small></span>
+          <span class="profile-menu" aria-hidden="true">···</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="workspace" id="conversation">
+      <header class="topbar">
+        <div class="breadcrumbs"><span>Support</span><span aria-hidden="true">/</span><strong>Live conversation</strong></div>
+        <div class="topbar-actions">
+          <span class="online-status"><span class="status-dot"></span> Support chat</span>
+          <button id="reset" class="new-chat" type="button"><span aria-hidden="true">＋</span> New conversation</button>
+        </div>
+      </header>
+
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">CUSTOMER CARE <span class="heading-dot">•</span> 24/7 ASSISTANCE</p>
+          <h1>How can we help?</h1>
+          <p>Get clear answers about your orders, returns, and more.</p>
+        </div>
+        <div class="secure-label"><span aria-hidden="true">⌑</span> Private &amp; secure</div>
+      </div>
+
+      <div class="content-grid">
+        <section class="conversation-card" aria-label="Support conversation">
+          <div class="conversation-toolbar">
+            <div class="conversation-title">
+              <span class="assistant-avatar" aria-hidden="true">Z</span>
+              <span><strong>ZentroMart assistant</strong><small><span class="status-dot"></span> Here to help</small></span>
+            </div>
+            <span class="case-label"><span class="case-dot"></span> SECURE CHAT</span>
+          </div>
+
+          <section id="chat" class="chat-feed" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions text">
+            <div class="message bot">
+              <div class="message-avatar" aria-hidden="true">Z</div>
+              <div class="message-content">
+                <span class="message-label">ZentroMart assistant <time>now</time></span>
+                <div class="message-bubble">Hello! I'm ZentroMart's AI assistant. How can I help?</div>
+              </div>
+            </div>
+            <div class="quick-actions" aria-label="Suggested questions">
+              <span class="suggestion-label">POPULAR TOPICS</span>
+              <button type="button" data-message="Where is my order?"><span aria-hidden="true">↗</span> Track an order</button>
+              <button type="button" data-message="What is your return policy?"><span aria-hidden="true">↩</span> Returns</button>
+              <button type="button" data-message="How do refunds work?"><span aria-hidden="true">＄</span> Refunds</button>
+            </div>
+          </section>
+
+          <div id="live-status" class="sr-only" role="status" aria-live="polite"></div>
+          <section class="input-area" aria-label="Message controls">
+            <form id="form" class="composer">
+              <label class="sr-only" for="message">Your message</label>
+              <input id="message" placeholder="Message ZentroMart support…" autocomplete="off" maxlength="2000">
+              <button id="record" class="voice-button" type="button" aria-label="Start voice message">
+                <span class="record-icon" aria-hidden="true">●</span><span>Voice message</span>
+              </button>
+              <button class="send-button" type="submit"><span>Send</span><span aria-hidden="true">↗</span></button>
+            </form>
+            <div class="composer-footer">
+              <span class="privacy-hint"><span aria-hidden="true">⌑</span> Never share passwords or full payment details.</span>
+              <input id="audio-file" class="file-input" type="file" accept="audio/*" aria-label="Upload an audio message">
+              <label class="upload-button" for="audio-file"><span aria-hidden="true">↑</span> Upload audio</label>
+            </div>
+            <details class="voice-settings">
+              <summary>VOICE PREFERENCES <span>Language &amp; playback</span></summary>
+              <div class="settings-grid">
+                <label>Spoken language
+                  <select id="stt-language" aria-label="Speech recognition language">
+                    <option value="en-IN">English / Hinglish</option><option value="bn-IN">Bengali</option>
+                    <option value="gu-IN">Gujarati</option><option value="hi-IN">Hindi</option>
+                    <option value="kn-IN">Kannada</option><option value="ml-IN">Malayalam</option>
+                    <option value="mr-IN">Marathi</option><option value="pa-IN">Punjabi</option>
+                    <option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option>
+                  </select>
+                </label>
+                <label>Reply language
+                  <select id="tts-language" aria-label="Speech output language">
+                    <option value="en-IN">English</option><option value="hi-en">Hinglish</option>
+                    <option value="bn-IN">Bengali</option><option value="gu-IN">Gujarati</option>
+                    <option value="hi-IN">Hindi</option><option value="kn-IN">Kannada</option>
+                    <option value="ml-IN">Malayalam</option><option value="mr-IN">Marathi</option>
+                    <option value="pa-IN">Punjabi</option><option value="ta-IN">Tamil</option>
+                    <option value="te-IN">Telugu</option>
+                  </select>
+                </label>
+                <label>Assistant voice
+                  <select id="tts-voice" aria-label="Gnani speech voice">
+                    <option value="Kaveri">Kaveri</option><option value="Trupti">Trupti</option>
+                    <option value="Pranav">Pranav</option><option value="Shlok">Shlok</option>
+                  </select>
+                </label>
+              </div>
+            </details>
+          </section>
+        </section>
+
+        <aside class="info-panel" aria-label="Support information">
+          <section class="info-card welcome-card">
+            <div class="welcome-art" aria-hidden="true"><span>✳</span><i></i><b></b></div>
+            <p class="eyebrow">YOUR SUPPORT, SIMPLIFIED</p>
+            <h2>What can we help you solve?</h2>
+            <p>Ask us anything about your ZentroMart experience. We’ll guide you to the right answer.</p>
+          </section>
+
+          <section class="info-card topics-card">
+            <div class="card-heading"><h2>Explore support</h2><span>04 TOPICS</span></div>
+            <button class="topic-row" type="button" data-message="Where is my order?"><span class="topic-icon">↗</span><span><strong>Orders &amp; delivery</strong><small>Track a package or update details</small></span><span class="row-arrow">›</span></button>
+            <button class="topic-row" type="button" data-message="What is your return policy?"><span class="topic-icon">↩</span><span><strong>Returns &amp; exchanges</strong><small>Eligibility and how to return</small></span><span class="row-arrow">›</span></button>
+            <button class="topic-row" type="button" data-message="How do refunds work?"><span class="topic-icon">＄</span><span><strong>Payments &amp; refunds</strong><small>Timelines and payment methods</small></span><span class="row-arrow">›</span></button>
+            <button class="topic-row" type="button" data-message="My product stopped working. Is it under warranty?"><span class="topic-icon">◇</span><span><strong>Product &amp; warranty</strong><small>Care, repairs, and coverage</small></span><span class="row-arrow">›</span></button>
+          </section>
+
+          <div class="trust-note"><span aria-hidden="true">✓</span><span><strong>Your details stay private</strong><small>Order details are only shared after verification.</small></span></div>
+        </aside>
+      </div>
+      <footer class="workspace-footer"><span>© 2026 ZENTROMART SUPPORT</span><span>Need urgent help? <a href="#message">Start a conversation</a></span></footer>
+    </main>
+  </div>
+  <script src="/static/app.js?v=20261024-9"></script>
+</body>
+</html>

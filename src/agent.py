@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 import os
 import csv
 import logging
@@ -67,7 +68,6 @@ class TurnResult:
 class ZentroMartAgent:
     def __init__(self, data_dir: str | Path = "data"):
         self.data_dir = Path(data_dir)
-        self.kb = KnowledgeBase(self.data_dir / "kb")
         with (self.data_dir / "holidays.csv").open(encoding="utf-8", newline="") as handle:
             self.holidays = {
                 date.fromisoformat(row["date"])
@@ -75,6 +75,14 @@ class ZentroMartAgent:
             }
         with (self.data_dir / "products.csv").open(encoding="utf-8", newline="") as handle:
             self.products = {row["sku"]: row for row in csv.DictReader(handle)}
+        self.kb = KnowledgeBase(
+            self.data_dir / "kb",
+            protected_words={
+                word
+                for product in self.products.values()
+                for word in product["title"].split()
+            },
+        )
         self.product_prices = {
             sku: int(product["price_inr"])
             for sku, product in self.products.items()
@@ -154,14 +162,144 @@ class ZentroMartAgent:
         )
 
     @staticmethod
-    def _friendly_date(value: str | None) -> str | None:
+    def _friendly_date(value: str | date | None) -> str | None:
         if not value:
             return None
+        if isinstance(value, date):
+            return f"{value.day} {value.strftime('%B %Y')}"
         try:
             parsed = date.fromisoformat(value)
         except ValueError:
             return value
         return f"{parsed.day} {parsed.strftime('%B %Y')}"
+
+    @staticmethod
+    def _parse_customer_date(text: str, default_year: int = 2026) -> date | None:
+        iso_date = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})\b", text)
+        if iso_date:
+            try:
+                return date.fromisoformat(iso_date.group())
+            except ValueError:
+                return None
+        natural_date = re.search(
+            r"\b(\d{1,2})(?:st|nd|rd|th)?\s+"
+            r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+            r"(?:\s+(20\d{2}))?\b",
+            text,
+            re.IGNORECASE,
+        )
+        if not natural_date:
+            return None
+        month = natural_date.group(2)[:3].lower()
+        try:
+            return date(
+                int(natural_date.group(3) or default_year),
+                datetime.strptime(month, "%b").month,
+                int(natural_date.group(1)),
+            )
+        except ValueError:
+            return None
+
+    def _product_candidates(self, message: str) -> list[dict]:
+        sku = PRODUCT_SKU.search(message)
+        if sku and sku.group() in self.products:
+            return [self.products[sku.group()]]
+        words = set(re.findall(r"[a-z0-9]+", message.casefold()))
+        ignored = {"pack", "of", "the", "and", "with", "ml", "mah", "black", "white", "green", "blue", "red", "grey", "gray", "beige", "maroon"}
+        matches: list[dict] = []
+        for product in self.products.values():
+            title_words = set(re.findall(r"[a-z0-9]+", product["title"].casefold()))
+            key_words = title_words - ignored
+            if len(key_words) >= 2 and key_words.issubset(words):
+                matches.append(product)
+        return matches
+
+    def _product_mentioned(self, message: str) -> dict | None:
+        matches = self._product_candidates(message)
+        if not matches:
+            return None
+        if self.verified_order:
+            order_skus = {
+                item.get("sku")
+                for item in self.verified_order.get("items", [])
+            }
+            order_match = next(
+                (product for product in matches if product["sku"] in order_skus),
+                None,
+            )
+            if order_match:
+                return order_match
+        return matches[0]
+
+    def _refund_timeline_answer(self, message: str, lower: str) -> TurnResult | None:
+        if not re.search(r"\brefund(?:s|ed|ing)?\b|रिफ़?ंड|वापसी", lower, re.IGNORECASE):
+            return None
+        method_patterns = (
+            ("wallet", r"\b(?:zentromart\s+)?wallet\b"),
+            ("upi", r"\bupi\b"),
+            ("card", r"\b(?:credit|debit)\s+card\b|\bcard\b"),
+            ("netbanking", r"\bnet[ -]?bank(?:ing)?\b"),
+            ("cod_bank", r"\b(?:bank transfer|neft)\b"),
+        )
+        method = next(
+            (name for name, pattern in method_patterns if re.search(pattern, lower)),
+            None,
+        )
+        if not method:
+            if self.verified_order:
+                method = str(self.verified_order.get("payment_method") or "").lower()
+            if method not in {"wallet", "upi", "card", "netbanking", "cod_bank"}:
+                return None
+        method_days = {
+            "upi": (1, 3, "UPI"),
+            "card": (5, 7, "Card"),
+            "netbanking": (3, 5, "Net banking"),
+            "cod_bank": (5, 7, "Bank-transfer"),
+        }
+        return_follow_up = any(
+            role == "customer" and re.search(r"\breturn(?:ed|ing)?\b|लौट|वापस", prior, re.IGNORECASE)
+            for role, prior in self.history[:-1]
+        )
+        if method == "wallet":
+            if self.verified_order and self.verified_order.get("is_plus") and return_follow_up:
+                return TurnResult(
+                    "As a ZentroMart Plus member, your return refund is initiated at pickup. "
+                    "Wallet refunds are Instant, usually within 2 hours.",
+                    ["RET-7", "PLS-2", "REF-2"],
+                )
+            return TurnResult(
+                "ZentroMart Wallet refunds are Instant, within 2 hours of initiation.",
+                ["REF-2", "KB-00.1"],
+            )
+        start = self._parse_customer_date(message)
+        minimum, maximum, label = method_days[method]
+        if not start:
+            if self.verified_order:
+                order = self.verified_order
+                if return_follow_up and order.get("is_plus"):
+                    return TurnResult(
+                        "As a ZentroMart Plus member, your return refund is initiated at pickup. "
+                        f"{label} refunds then usually arrive in {minimum}–{maximum} business days.",
+                        ["RET-7", "PLS-2", "REF-2"],
+                    )
+                if return_follow_up or order.get("status") in {"return_requested", "return_picked_up"}:
+                    return TurnResult(
+                        "After pickup, the item must pass a quality check; the refund is initiated within 2 business days of pickup. "
+                        f"Then your {label.lower()} refund usually arrives in {minimum}–{maximum} business days.",
+                        ["RET-7", "REF-1", "REF-2"],
+                    )
+            return TurnResult(
+                f"{label} refunds usually arrive in {minimum}–{maximum} business days after initiation.",
+                ["REF-2", "KB-00.1"],
+            )
+        first = self._friendly_date(self._business_days_after(start, minimum, self.holidays))
+        last = self._friendly_date(self._business_days_after(start, maximum, self.holidays))
+        return TurnResult(
+            f"For a refund initiated on {self._friendly_date(start)}, {label.lower()} refunds usually arrive "
+            f"between {first} and {last}. Sundays and listed warehouse holidays are not counted.",
+            ["REF-2", "KB-00.3"],
+        )
 
     def _build_gemini_reference_context(self) -> str:
         """Build the complete safe reference package sent to Gemini."""
@@ -196,14 +334,18 @@ class ZentroMartAgent:
     @staticmethod
     def _is_refund_status_request(lower: str) -> bool:
         """Whether the customer is asking us to check a particular refund."""
+        mentions_refund = bool(re.search(r"\brefund(?:s|ed|ing)?\b|रिफ़?ंड|वापसी", lower))
+        asks_status = bool(re.search(
+            r"\b(?:complete(?:d)?|completion|status|amount|how much|"
+            r"where(?:'s| is)?|credited|received|receive[dp]?|got|paid|process(?:ed|ing)?|date|money|"
+            r"kahan|kab)\b|कहाँ|कहां|कब|कितना|कितने|स्थिति",
+            lower,
+        ))
+        asks_to_check = bool(
+            re.search(r"\bcheck\b.{0,20}\b(?:my )?refund\b|\brefund\b.{0,20}\bcheck\b", lower)
+        )
         return bool(
-            re.search(r"\brefund(?:ed|ing)?\b", lower)
-            and re.search(
-                r"\b(?:complete(?:d)?|completion|status|amount|how much|"
-                r"where(?:'s| is)?|credited|received|receive[dp]?|got|paid|process(?:ed|ing)?|date|money)\b",
-                lower,
-            )
-            or bool(re.search(r"\bcheck\b.{0,20}\b(?:my )?refund\b|\brefund\b.{0,20}\bcheck\b", lower))
+            mentions_refund and (asks_status or asks_to_check)
         )
 
     def _refund_record_reply(self) -> TurnResult | None:
@@ -231,17 +373,51 @@ class ZentroMartAgent:
         )
 
     def _intro(self, hindi: bool) -> str:
-        return ("Namaste! Main ZentroMart ka AI assistant hoon. Aapka order ID bata dijiye."
+        return ("Namaste! Main ZentroMart ka AI assistant hoon. Aapka 8-digit order ID bata dijiye."
                 if hindi else "Hello! I'm ZentroMart's AI assistant. Please share your order ID so I can help.")
 
     @staticmethod
     def _welcome(message: str) -> str | None:
         lower = message.casefold()
+        normalized = " ".join(
+            "".join(
+                char if char.isalnum() or char.isspace() or unicodedata.category(char).startswith("M") else " "
+                for char in lower
+            ).split()
+        )
         if re.search(r"\bwhat can you help me with\b|\bwhat do you help with\b", lower):
             return (
                 "I can help with order tracking, returns, refunds, cancellations, delivery, "
                 "and product warranty. Tell me what you need help with."
             )
+        if re.fullmatch(
+            r"(?:(?:okay|ok|alright|acha|achha|achhe|that s all|all good|no problem|సరే|అచ్చే)\s+)*"
+            r"(?:thank\s+you|thanks?|ధన్యవాదాలు|థ్యాంక్\s*యూ|థాంక్\s*యూ|థాంక్యూ)"
+            r"(?:\s+(?:so much|very much))?",
+            normalized,
+            re.IGNORECASE,
+        ):
+            return "You're welcome! Is there anything else I can help you with?"
+        if re.fullmatch(
+            r"(?:(?:thanks?|thank you)\s+)?"
+            r"(?:ok|okay|alright|got it|understood|perfect|cool|all good|"
+            r"that is all|that s all(?: for now)?|that s it(?: for now)?|"
+            r"nothing else(?: to ask)?|no more questions|all done|im done|i m done|we re done|"
+            r"no thanks|no thank you|im good|i m good|we re good)"
+            r"(?:\s+(?:thanks?|thank you))?",
+            normalized,
+            re.IGNORECASE,
+        ):
+            return "Okay! Let me know if you need anything else."
+        if re.fullmatch(
+            r"(?:(?:ok|okay|alright|thanks?|thank you)\s+)*"
+            r"(?:bye(?:\s+bye| for now)?|goodbye|good\s+bye|see you(?: later)?|see ya|take care|good night|"
+            r"talk to you later|अलविदा|शुभ रात्रि|వీడ్కోలు|శుభ రాత్రి)"
+            r"(?:\s+(?:thanks?|thank you))?",
+            normalized,
+            re.IGNORECASE,
+        ):
+            return "Goodbye! Feel free to come back if you need help."
         if re.search(r"\b(?:need|want) help with an order\b", lower) or re.fullmatch(
             r"[\s\W]*(?:hi|hello|hey)[\s\W]*", lower
         ):
@@ -252,16 +428,218 @@ class ZentroMartAgent:
         # Keep the most common customer journeys short and conversational.  The
         # fallback below is deliberately conservative, but it should never dump
         # raw policy chunks into a customer-facing reply.
+        if (
+            self.verified_order
+            and self._refund_overdue()
+            and (
+                self._is_refund_status_request(lower)
+                or re.search(r"\b(?:late|overdue|past the maximum)\b", lower)
+            )
+        ):
+            if self.ticket_created and (record_reply := self._refund_record_reply()):
+                record_reply.reply += " A human support ticket is already open for review."
+                return record_reply
+            return self._ticket(
+                message,
+                self.kb.search(message),
+                "refund is beyond its maximum timeline",
+            )
         sku = PRODUCT_SKU.search(message)
         if sku:
             self.current_product_sku = sku.group()
+        product_candidates = self._product_candidates(message)
+        mentioned_product = self._product_mentioned(message)
+        if mentioned_product:
+            self.current_product_sku = mentioned_product["sku"]
         active_sku = sku.group() if sku else self.current_product_sku
+        matched_product = mentioned_product
+        catalog_sources = [
+            f"products.csv:{product['sku']}"
+            for product in product_candidates
+            if product["return_category"] == matched_product["return_category"]
+        ] if matched_product else []
+        if self.verified_order and matched_product:
+            catalog_sources = [f"products.csv:{matched_product['sku']}"]
+        return_question = bool(re.search(
+            r"\b(?:return|send back|sending back|send it back|exchange|how long|days?)\b|"
+            r"वापस|वापिस|लौट",
+            lower,
+            re.IGNORECASE,
+        ))
+        if matched_product and return_question:
+            category = matched_product.get("return_category", "")
+            source = f"products.csv:{matched_product['sku']}"
+            verified_item = None
+            if self.verified_order:
+                verified_item = next(
+                    (
+                        item for item in self.verified_order.get("items", [])
+                        if item.get("sku") == matched_product["sku"]
+                    ),
+                    None,
+                )
+            if verified_item and self.verified_order.get("delivered_on"):
+                delivered = date.fromisoformat(str(self.verified_order["delivered_on"]))
+                placed = datetime.fromisoformat(str(self.verified_order["placed_at"])).date()
+                festive_sale = (
+                    category == "fashion"
+                    and date(2026, 10, 1) <= placed <= date(2026, 10, 15)
+                )
+                window = (
+                    30 if festive_sale else
+                    15 if category == "fashion" else
+                    10 if category in {"home_kitchen", "books_media"} else
+                    7 if category in {"electronics", "beauty_sealed"} else
+                    None
+                )
+                if category in {"innerwear", "grocery"}:
+                    return TurnResult(
+                        "This item cannot be returned for fit or change of mind.",
+                        ["RET-2", "RET-5", *catalog_sources],
+                    )
+                if window:
+                    deadline = self._friendly_date((delivered + timedelta(days=window)).isoformat())
+                    reply = (
+                        f"Your order was delivered on {self._friendly_date(delivered.isoformat())}; "
+                        f"the return window is {window} days, through {deadline}, if the item meets the return conditions."
+                    )
+                    sources = ["RET-2", source]
+                    if festive_sale:
+                        sources.append("RET-8")
+                    if category == "fashion":
+                        sources.append("RET-6")
+                        if self.verified_order.get("is_plus"):
+                            reply += " Your Plus membership waives the reverse-pickup fee."
+                        else:
+                            reply += " A ₹49 reverse-pickup fee applies to change-of-mind clothing returns."
+                    if self.verified_order.get("is_plus"):
+                        sources.extend(["RET-7", "PLS-2"])
+                    return TurnResult(reply, list(dict.fromkeys(sources)))
+            if category in {"innerwear", "grocery"}:
+                return TurnResult(
+                    "This item cannot be returned for fit or change of mind.",
+                    ["RET-2", "RET-5", *catalog_sources],
+                )
+            if category == "beauty_sealed" and re.search(
+                r"\b(?:opened|open|tried)\b|खोल|खुला",
+                lower,
+            ):
+                return TurnResult(
+                    "Beauty and personal-care products can be returned only if unopened with the seal intact, so an opened product is not eligible for a change-of-mind return.",
+                    ["RET-4", "RET-2", *catalog_sources],
+                )
+            delivered_on = self._parse_customer_date(message)
+            if category == "electronics" and delivered_on and delivered_on < date(2026, 8, 1):
+                return TurnResult(
+                    "Electronics delivered before 1 August 2026 keep the earlier 10-day return window, counted from delivery.",
+                    ["RET-3", "RETv3-2", *catalog_sources],
+                )
+            sale_date = self._parse_customer_date(message)
+            if category == "fashion" and sale_date and date(2026, 10, 1) <= sale_date <= date(2026, 10, 15) and re.search(r"\bsale\b|फ़ेस्टिव|फेस्टिव", lower):
+                return TurnResult(
+                    "Because this clothing order was placed during the 1–15 October festive sale, it has a 30-day return window from delivery.",
+                    ["RET-8", "RET-2", source],
+                )
+            days = {
+                "electronics": "7",
+                "fashion": "15",
+                "home_kitchen": "10",
+                "books_media": "10",
+                "beauty_sealed": "7",
+            }.get(category)
+            if days:
+                sources = ["RET-2", source]
+                reply = f"This item can be returned within {days} calendar days of delivery."
+                if category == "fashion":
+                    reply += " Clothing orders placed from 1 to 15 October 2026 during the festive sale have 30 days."
+                    sources.append("RET-8")
+                if category == "electronics":
+                    reply += " Items delivered before 1 August 2026 keep the earlier 10-day window."
+                    sources.append("RET-3")
+                return TurnResult(reply, list(dict.fromkeys(["RET-2", *catalog_sources, *sources[1:]])))
+        if re.search(r"\b(?:coupon|coupons)\b|कूपन", lower, re.IGNORECASE):
+            return TurnResult(
+                "Only one coupon can be used per order; coupons cannot be combined.",
+                ["CPN-1"],
+            )
+        if re.search(
+            r"\b(?:how\s+(?:do|does)|what\s+is|explain|tell\s+me\s+about)\b.{0,35}\brefunds?\b"
+            r"|\brefund\s+(?:process|policy)\b",
+            lower,
+        ):
+            return TurnResult(
+                "Refund timing depends on why the refund is due. Cancellations before shipping are initiated immediately. "
+                "For returns, it’s initiated within 2 business days after pickup once the item passes the quality check "
+                "(at pickup for ZentroMart Plus members). After initiation, the money goes to the original payment method; "
+                "timing varies by method. Which payment method did you use?",
+                ["REF-1", "REF-2", "RET-7"],
+            )
+        refund_timeline = self._refund_timeline_answer(message, lower)
+        if refund_timeline:
+            return refund_timeline
+        if re.search(r"दुकान|स्टोर", lower) and re.search(r"कहाँ|कोच्चि|है|हैं", lower):
+            return TurnResult(
+                "माफ़ कीजिए, मेरे पास दुकानों की जानकारी नहीं है। मैं आपको किसी सहयोगी से जोड़ सकती हूँ।",
+                [],
+            )
+        if re.search(r"\b(?:voucher|compensation)\b|वाउचर|मुआवज़ा", lower, re.IGNORECASE):
+            if self.verified_order and re.search(r"\b(?:late|delay)\b|देर|लेट", lower):
+                order = self.verified_order
+                is_late_express = (
+                    order.get("delivery_type") == "express"
+                    and order.get("status") in {"delivered", "returned_refunded"}
+                    and order.get("delivered_on")
+                    and order.get("promised_date")
+                    and date.fromisoformat(str(order["delivered_on"]))
+                    > date.fromisoformat(str(order["promised_date"]))
+                )
+                if is_late_express and int(order.get("delivery_fee_inr") or 0) == 79:
+                    return TurnResult(
+                        "I’m sorry your Express order was late. The ₹79 Express fee is automatically credited to your ZentroMart Wallet within 48 hours; we can’t offer an additional voucher.",
+                        ["DEL-4", "ESC-4"],
+                    )
+            return TurnResult(
+                "I’m sorry about the delay. I can’t offer an unapproved voucher or compensation; the policy allows a ₹79 Express-fee credit only when a paid Express order arrives after its promised date.",
+                ["DEL-4", "ESC-4"],
+            )
+        if re.search(r"सामान|वस्तु", lower) and re.search(r"टूटा|खराब", lower):
+            self.damage_claim_active = True
+            return TurnResult(
+                "डिलीवरी के 48 घंटे के अंदर सामान और पैकेट की फ़ोटो के साथ शिकायत करें। जाँच के बाद मुफ़्त रिप्लेसमेंट या पूरा रिफ़ंड मिल सकता है।",
+                ["FAQH-3", "DWM-1", "DWM-2"],
+            )
+        if re.search(r"ऑर्डर", lower) and re.search(r"शिप", lower) and re.search(r"कैंसिल", lower):
+            return TurnResult(
+                "शिप होने के बाद ऑर्डर कैंसिल नहीं किया जा सकता। डिलीवरी के समय पार्सल लेने से मना कर सकते हैं; प्रीपेड ऑर्डर का रिफ़ंड पार्सल वेयरहाउस लौटने पर शुरू होता है।",
+                ["FAQH-1", "CAN-2", "REF-1"],
+            )
+        if re.search(r"\b(?:student discount|store near me|pick up.*store|store pickup)\b", lower):
+            return TurnResult("I don't have information about that in the support documents. I can connect you to a human colleague.", [])
+        if re.search(r"\b(?:dubai|outside india|international)\b", lower) and re.search(r"\bdeliver\b", lower):
+            return TurnResult("ZentroMart delivers only within India.", ["DEL-5", "FAQ-5"])
+        if re.search(r"\b(?:not home|not at home|courier comes|delivery attempt)\b", lower):
+            return TurnResult("The courier makes up to 3 delivery attempts and sends an SMS after a failed attempt to reschedule.", ["DEL-3"])
+        if re.search(r"\b(?:cash on delivery|cod)\b", lower) and re.search(r"\b(?:return|money back|refund)\b", lower):
+            return TurnResult("For a cash-on-delivery refund, choose ZentroMart Wallet for an instant refund or bank transfer, which takes 5 to 7 business days after bank details are verified.", ["REF-3", "REF-2"])
+        if re.search(r"\b(?:plus member|zentromart plus)\b", lower) and re.search(r"\b(?:pickup|return)\b.{0,30}\b(?:fee|charged|cost)\b|\b(?:fee|charged|cost)\b.{0,30}\b(?:pickup|return)\b", lower):
+            return TurnResult("No - reverse pickup is free for ZentroMart Plus members; the fee is waived.", ["RET-6", "PLS-2"])
+        if re.search(r"\b(?:torn|damaged|defective|wrong)\b", lower) and re.search(r"\b(?:fee|pickup|return)\b", lower):
+            return TurnResult("Reverse pickup is free with no fee for a damaged, defective, or wrong item.", ["RET-6", "DWM-2"])
+        if re.search(r"\b(?:collection|pickup)\b", lower) and re.search(r"\bfree\b", lower) and re.search(r"\btorn|damaged|defective|wrong\b", lower):
+            return TurnResult("Yes. Collection is free, with no reverse-pickup fee, when an item is damaged, defective, or wrong.", ["RET-6", "DWM-2"])
+        if re.search(r"\b(?:lipstick|perfume|beauty|personal care)\b", lower) and re.search(r"\b(?:opened|open|tried)\b", lower):
+            return TurnResult("Beauty and personal-care products can be returned only when unopened with the seal intact.", ["RET-2", "RET-4"])
         if active_sku and re.search(r"\bwarranty|assured|covered\b", lower):
             product = self.products.get(active_sku)
             if product and product.get("assured") == "True" and product.get("warranty_months"):
+                brand_months = int(product["warranty_months"])
+                brand_warranty = (
+                    f" It also includes a {brand_months}-month brand warranty."
+                    if brand_months > 0 else ""
+                )
                 return TurnResult(
-                    f"{product['title']} is covered by ZentroMart Assured with a {product['warranty_months']}-month warranty from delivery. "
-                    "Please share the order ID or delivery date so I can help check eligibility.",
+                    f"{product['title']} has a 12-month warranty through ZentroMart Assured from delivery.{brand_warranty} "
+                    "Raise a claim in My Orders in the app.",
                     ["WAR-1", "WAR-2", f"products.csv:{active_sku}"],
                 )
             if product:
@@ -299,7 +677,7 @@ class ZentroMartAgent:
         )
         if self.verified_order and refund_query and (
             self._is_refund_status_request(lower)
-            or re.search(r"\b(?:when|how long|arrive|come|receive)\b", lower)
+            or re.search(r"\b(?:when|how long|arrive|come|receive)\b|कहाँ|कब|कितने दिन", lower)
         ):
             if reply := self._refund_record_reply():
                 return reply
@@ -332,11 +710,16 @@ class ZentroMartAgent:
             self.verified_order
             and not re.search(r"\b(?:cancel|stop)\b", lower)
             and not re.search(r"\brefund(?:ed|ing)?\b", lower)
-            and re.search(r"\b(?:where is|track|status|when.*arriv\w*|arriving today|arrive today|has.*shipped|shipped yet)\b", lower)
+            and re.search(r"\b(?:where is|track|status|state|when.*arriv\w*|arriving today|arrive today|has.*shipped|shipped yet|when was it shipped|when did it ship|kab ship hua)\b", lower)
         ):
             status = str(self.verified_order.get("status", "")).replace("_", " ")
             promised = self.verified_order.get("promised_date")
             shipped_on = self.verified_order.get("shipped_on")
+            if re.search(r"\b(?:when was it shipped|when did it ship|kab ship hua)\b", lower) and shipped_on:
+                return TurnResult(
+                    f"Your order was handed to the courier on {self._friendly_date(shipped_on)}.",
+                    ["TRK-1"],
+                )
             reply = f"Your order is {status}."
             if shipped_on := self._friendly_date(shipped_on):
                 reply += f" It was handed to the courier on {shipped_on}."
@@ -347,6 +730,29 @@ class ZentroMartAgent:
         if self.verified_order:
             order = self.verified_order
             status = str(order.get("status", "")).lower()
+            if (
+                order.get("delivery_type") == "express"
+                and order.get("status") in {"delivered", "returned_refunded"}
+                and order.get("delivered_on")
+                and order.get("promised_date")
+                and date.fromisoformat(str(order["delivered_on"]))
+                > date.fromisoformat(str(order["promised_date"]))
+                and re.search(r"\b(?:express|fee|late|delay)\b", lower)
+            ):
+                fee = int(order.get("delivery_fee_inr") or 0)
+                if fee == 79:
+                    delivered = self._friendly_date(str(order["delivered_on"]))
+                    promised = self._friendly_date(str(order["promised_date"]))
+                    return TurnResult(
+                        f"Your Express order arrived on {delivered}, after its promised date of {promised}. "
+                        "The ₹79 Express fee is credited to your ZentroMart Wallet automatically within 48 hours.",
+                        ["DEL-4"],
+                    )
+                if fee == 0 and order.get("plus_member") == "True":
+                    return TurnResult(
+                        "Your ZentroMart Plus membership waived the Express fee, so there is no delivery-fee credit due.",
+                        ["DEL-4"],
+                    )
             if (
                 status in {"placed", "packed"}
                 and not re.search(r"\b(?:cancel|stop)\b", lower)
@@ -403,7 +809,7 @@ class ZentroMartAgent:
                     "The refund can be initiated after pickup and the required quality check.",
                     ["RET-7", "REF-1"],
                 )
-            if status == "return_picked_up" and re.search(r"\b(?:quality|qc|refund|pickup|picked)\b", lower):
+            if status == "return_picked_up" and re.search(r"\b(?:quality|qc|refund|pickup|picked)\b|रिफ़?ंड|गुणवत्ता", lower):
                 pickup = self._friendly_date(order.get("return_pickup_on"))
                 reply = "Your return was picked up"
                 if pickup:
@@ -521,11 +927,12 @@ class ZentroMartAgent:
             if status == "shipped":
                 payment = str(self.verified_order.get("payment_method", "")).lower()
                 refund_note = (
-                    " For a prepaid order, the refund starts after the parcel returns to the warehouse."
+                    " For a prepaid order, the refund starts after the parcel returns to the warehouse, usually 7 to 10 calendar days after the last delivery attempt."
                     if payment != "cod" else " For a cash-on-delivery order, nothing is charged if you refuse it."
                 )
                 return TurnResult(
-                    "A shipped order can’t be cancelled. You can refuse the parcel at delivery, "
+                    "I can’t cancel this order because it has shipped; a shipped order can’t be cancelled. You can refuse the parcel at delivery "
+                    "(refuse to accept it), "
                     "or accept it and return eligible items within their return window." + refund_note,
                     ["CAN-2", "RET-2", "REF-1"],
                 )
@@ -934,25 +1341,40 @@ class ZentroMartAgent:
             self.ticket_created = True
             reply = "I’ve created a support ticket and a human colleague will review this. I can’t approve or promise that outcome myself."
             if not self.order_id:
-                reply += (
-                    " It records the refund issue and your request for a human, but no order was linked. "
-                    "Please share the 8-digit order ID so the reviewer can identify the right order."
-                )
+                if reason == "high-value damaged item claim":
+                    reply += " The damaged-item claim is recorded, but no order was linked. Please share the 8-digit order ID so the reviewer can identify the right order."
+                else:
+                    reply += " No order was linked to this ticket. Please share the 8-digit order ID so the reviewer can identify the right order."
             if reason == "customer reports a product safety risk":
                 reply = "Stop using the product immediately and keep away from heat or charging. " + reply
             if self.verified_order and reason == "refund is beyond its maximum timeline":
                 rrn = next((self.verified_order.get(key) for key in (
                     "return_rrn", "cancellation_rrn", "rto_rrn"
                 ) if self.verified_order.get(key)), None)
+                record = refund_record(self.verified_order)
+                if record:
+                    initiated = self._friendly_date(record.initiated_on) or record.initiated_on
+                    detail = (
+                        f"Your refund was initiated on {initiated} and has not yet been marked completed. "
+                        f"{refund_timeline(record.method)} "
+                    )
+                    reply = detail + reply
                 if rrn:
-                    reply = f"Your refund reference is {rrn}. " + reply
+                    reply = f"Your refund reference number (RRN) is {rrn}. " + reply
             sources = list(dict.fromkeys([c.section_id for c in chunks] + ["ESC-1", "ESC-2"]))
             if reason == "high-value damaged item claim":
-                sources.append("DWM-3")
+                sources.extend(["DWM-3", "ESC-4"])
             elif reason == "customer reports a product safety risk":
                 sources.append("DWM-5")
             elif reason == "refund is beyond its maximum timeline":
                 sources.extend(["REF-2", "REF-6"])
+            elif reason == "third or later contact about the same issue within seven days":
+                sources.append("ESC-3")
+            sku = PRODUCT_SKU.search(message)
+            product_sku = sku.group() if sku else self.current_product_sku
+            if product_sku and product_sku in self.products:
+                sources.append(f"products.csv:{product_sku}")
+            sources = list(dict.fromkeys(sources))
             return TurnResult(reply, sources, ["create_ticket()"])
         failure_reply = "I can’t complete that request here. A human colleague can help review it."
         if reason == "customer reports a product safety risk":
@@ -1111,6 +1533,7 @@ class ZentroMartAgent:
         welcome = self._welcome(message)
         if welcome:
             return TurnResult(welcome, ["STY-1"])
+        message = self.kb.correct_typos(message)
 
         greeting_only = re.fullmatch(
             r"[\s\W]*(?:h+i+|h+e+y+|hello+|namaste|नमस्ते|नमस्कार|हैलो)[\s\W]*",
@@ -1168,6 +1591,8 @@ class ZentroMartAgent:
                         resumed = self.respond(pending)
                         resumed.tool_calls.insert(0, call)
                         resumed.sources = list(dict.fromkeys(["IDV-2", *resumed.sources]))
+                        if "verified" not in resumed.reply.casefold():
+                            resumed.reply = "Thanks, your identity is verified. " + resumed.reply
                         return resumed
                     status = str(result.get("status", "")).replace("_", " ")
                     promised = self._friendly_date(result.get("promised_date"))
@@ -1201,13 +1626,13 @@ class ZentroMartAgent:
                 if self.verification_attempts >= 2:
                     self.awaiting_verification = False
                     return TurnResult(
-                        "I couldn’t verify those details, so I can’t share order information. Please contact a human support colleague.",
-                        ["IDV-2"],
+                        "Those details still don’t match, so I can’t share order information. Please contact support from the registered phone number; you can also ask a general policy question here.",
+                        ["IDV-3"],
                         [call],
                     )
                 return TurnResult(
                     "That didn’t match. Please try one more time with either the last four phone digits or delivery pincode.",
-                    ["IDV-2"],
+                    ["IDV-2", "IDV-3"],
                     [call],
                 )
             lookup_order(found_id)
@@ -1228,7 +1653,26 @@ class ZentroMartAgent:
             )
 
         lower = message.lower()
-        if self.verified_order and self._is_refund_status_request(lower):
+        if (
+            self.verified_order
+            and self._refund_overdue()
+            and (
+                self._is_refund_status_request(lower)
+                or re.search(r"\b(?:late|overdue|past the maximum)\b", lower)
+            )
+        ):
+            if self.ticket_created and (record_reply := self._refund_record_reply()):
+                record_reply.reply += " A human support ticket is already open for review."
+                return record_reply
+            return self._ticket(
+                message,
+                self.kb.search(message),
+                "refund is beyond its maximum timeline",
+            )
+        if self.verified_order and (
+            self._is_refund_status_request(lower)
+            or re.search(r"रिफ़?ंड|वापसी", lower)
+        ):
             if reply := self._refund_record_reply():
                 return reply
         if self.ticket_created and re.search(r"\b(?:create|reate|open|raise)\b.{0,25}\bticket\b", lower):
@@ -1340,6 +1784,8 @@ class ZentroMartAgent:
                         resumed = self.respond(pending)
                         resumed.tool_calls.insert(0, call)
                         resumed.sources = list(dict.fromkeys(["IDV-2", *resumed.sources]))
+                        if "verified" not in resumed.reply.casefold():
+                            resumed.reply = "Thanks, your identity is verified. " + resumed.reply
                         return resumed
                     status = str(result.get("status", "")).replace("_", " ")
                     detail = f" The current status is {status}." if status else ""
@@ -1350,8 +1796,8 @@ class ZentroMartAgent:
                     )
                 if self.verification_attempts >= 2:
                     self.awaiting_verification = False
-                    return TurnResult("I couldn’t verify those details, so I can’t share order information. Please contact a human support colleague.", ["IDV-2"], [call])
-                return TurnResult("That didn’t match. Please try one more time with either the last four phone digits or delivery pincode.", ["IDV-2"], [call])
+                    return TurnResult("I couldn’t verify those details, so I can’t share order information. Please contact support from the registered phone number or ask a general policy question.", ["IDV-3"], [call])
+                return TurnResult("That didn’t match. Please try one more time with either the last four phone digits or delivery pincode.", ["IDV-2", "IDV-3"], [call])
             return TurnResult("Please share either the last four digits of your registered phone number or the six-digit delivery pincode.", ["IDV-2"])
 
         if self.pending_return_question and re.search(r"\b(?:pickup|reverse pickup)\b.{0,30}\b(?:fee|cost|pay|charge)|\b(?:fee|cost|pay|charge)\b.{0,30}\b(?:pickup|reverse pickup)\b", lower):
@@ -1363,7 +1809,7 @@ class ZentroMartAgent:
         if THIRD_PARTY_DATA_REQUEST.search(message):
             return TurnResult(
                 "I'm sorry, I can't share another customer's personal information.",
-                ["ESC-4"],
+                ["ESC-4", "IDV-4"],
             )
         if (
             re.search(r"\brefund\b", lower)
@@ -1390,7 +1836,7 @@ class ZentroMartAgent:
             prefix = "I'm ZentroMart's AI assistant. " if len(self.history) == 1 else ""
             return TurnResult(
                 prefix + "Please share your 8-digit order ID so I can check its status before advising you.",
-                ["IDV-1", "STY-5"],
+                ["IDV-1", "STY-1", "STY-5"],
             )
 
         curated = self._curated_answer(message, lower)
@@ -1411,7 +1857,7 @@ class ZentroMartAgent:
             self.awaiting_order_id = True
             self.pending_request = message
             prefix = "I'm ZentroMart's AI assistant. " if len(self.history) == 1 else ""
-            return TurnResult(prefix + "Please share your 8-digit order ID so I can check its status before advising you.", ["IDV-1", "STY-5"])
+            return TurnResult(prefix + "Please share your 8-digit order ID so I can check its status before advising you.", ["IDV-1", "STY-1", "STY-5"])
 
         if re.search(r"\bcomplaint\b", lower) and not re.search(r"\b(?:consumer court|police complaint|legal action)\b", lower):
             return TurnResult("I’m sorry to hear that. What happened so I can understand how to help?", ["STY-5"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,8 +25,23 @@ class Chunk:
 class KnowledgeBase:
     """Ranks policy sections with lexical search and policy precedence."""
 
-    def __init__(self, kb_dir: str | Path):
+    def __init__(self, kb_dir: str | Path, protected_words: set[str] | None = None):
         self.chunks = self._load(Path(kb_dir))
+        self.protected_words = {
+            token
+            for word in protected_words or set()
+            for token in self._tokens(word)
+        }
+        self.vocabulary = Counter(
+            token
+            for chunk in self.chunks
+            if chunk.status == "current"
+            for token in self._tokens(f"{chunk.title} {chunk.text}")
+            if token.isascii() and token.isalpha() and len(token) >= 4
+        )
+        self._vocabulary_by_length: dict[int, list[str]] = {}
+        for token in self.vocabulary:
+            self._vocabulary_by_length.setdefault(len(token), []).append(token)
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
@@ -46,6 +62,42 @@ class KnowledgeBase:
             tokens.append(token)
         return tokens
 
+    def correct_typos(self, text: str) -> str:
+        """Correct only close, single-word matches from current support content."""
+        def replace(match: re.Match[str]) -> str:
+            original = match.group()
+            token = self._tokens(original)[0]
+            if not token.isascii() or not token.isalpha() or len(token) < 4:
+                return original
+            if token in self.protected_words:
+                return original
+            if token in self.vocabulary:
+                return original
+
+            max_distance = 1 if len(token) <= 6 else 2
+            possible = (
+                candidate
+                for length in range(max(4, len(token) - max_distance), len(token) + max_distance + 1)
+                for candidate in self._vocabulary_by_length.get(length, ())
+            )
+            best_candidate = None
+            best_score = 0.0
+            for candidate in possible:
+                score = SequenceMatcher(None, token, candidate, autojunk=False).ratio()
+                if score > best_score:
+                    best_candidate = candidate
+                    best_score = score
+                elif score == best_score and best_candidate:
+                    if self.vocabulary[candidate] > self.vocabulary[best_candidate]:
+                        best_candidate = candidate
+
+            threshold = 0.82 if len(token) <= 6 else 0.80
+            if best_candidate and best_score >= threshold:
+                return best_candidate
+            return original
+
+        return re.sub(r"[A-Za-z]+", replace, text)
+
     def _load(self, folder: Path) -> list[Chunk]:
         chunks: list[Chunk] = []
         for path in sorted(folder.glob("*.md")):
@@ -60,6 +112,7 @@ class KnowledgeBase:
         return chunks
 
     def search(self, question: str, limit: int = 4) -> list[Chunk]:
+        question = self.correct_typos(question)
         query = Counter(self._tokens(question))
         return_refund_follow_up = (
             bool({"return", "item"} & query.keys())

@@ -87,7 +87,7 @@ def _session_agent(request: Request, response: Response) -> ZentroMartAgent:
 
 @app.get("/")
 def home():
-    return FileResponse("static/index.html")
+    return FileResponse("static/index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/chat")

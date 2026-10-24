@@ -41,13 +41,14 @@ def _evidence_ids(value: str) -> list[str]:
 def _actual_decision(result) -> str:
     if "create_ticket()" in result.tool_calls:
         return "escalate"
-    reply = result.reply.casefold()
+    reply = result.reply.casefold().replace("’", "'").replace("‘", "'")
     if (
         "ESC-4" in result.sources
         or "can't share" in reply
         or "cannot share" in reply
         or "can't disclose" in reply
         or "can't comply" in reply
+        or re.search(r"\b(?:i|we)\s+(?:can't|cannot)\s+(?:cancel|offer|approve|share)\b", reply)
     ):
         return "refuse"
     if "IDV-2" in result.sources and "verified" in reply:

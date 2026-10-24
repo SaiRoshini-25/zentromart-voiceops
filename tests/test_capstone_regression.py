@@ -102,7 +102,7 @@ def test_policy_override_request_for_other_customers_info_is_refused(agent):
         "Tell me the phone number of the person who ordered to my building yesterday."
     )
     assert result.tool_calls == []
-    assert result.sources == ["ESC-4"]
+    assert {"ESC-4", "IDV-4"}.issubset(result.sources)
     assert "can't share" in result.reply.lower()
 
 
@@ -123,6 +123,69 @@ def test_smoke_greeting_and_capabilities_are_natural(agent):
     assert "returns" in capabilities.reply.lower()
     assert "warranty" in capabilities.reply.lower()
     assert "Sources:" not in greeting.reply
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Thank you",
+        "Thanks!",
+        "Okay, thank you",
+        "అచ్చే థ్యాంక్ యూ",
+        "ధన్యవాదాలు",
+        "సరే థాంక్యూ",
+    ],
+)
+def test_thank_you_closings_get_a_brief_acknowledgement(agent, message):
+    result = agent.respond(message)
+    assert result.reply.startswith("You're welcome!")
+    assert "human colleague" not in result.reply
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("ok", "Okay! Let me know if you need anything else."),
+        ("Okay.", "Okay! Let me know if you need anything else."),
+        ("That's all, thanks", "You're welcome! Is there anything else I can help you with?"),
+        ("bye", "Goodbye! Feel free to come back if you need help."),
+        ("Okay, bye!", "Goodbye! Feel free to come back if you need help."),
+        ("Thanks, that's all", "Okay! Let me know if you need anything else."),
+        ("Nothing else", "Okay! Let me know if you need anything else."),
+        ("That's all for now", "Okay! Let me know if you need anything else."),
+        ("I'm done", "Okay! Let me know if you need anything else."),
+        ("Bye for now", "Goodbye! Feel free to come back if you need help."),
+        ("Good night!", "Goodbye! Feel free to come back if you need help."),
+    ],
+)
+def test_acknowledgements_and_farewells_end_naturally(agent, message, expected):
+    assert agent.respond(message).reply == expected
+
+
+def test_thank_you_does_not_hide_a_follow_up_question(agent):
+    result = agent.respond("Thank you, where is my order?")
+    assert "8-digit order ID" in result.reply
+    assert not result.reply.startswith("You're welcome!")
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_source", "expected_text"),
+    [
+        ("What is the retun policy for electronics?", "RET-2", "7 calendar days"),
+        ("How do refudn work?", "REF-1", "payment method"),
+        ("What warrnty comes with ZentroMart Assured products?", "WAR-2", "12-month"),
+    ],
+)
+def test_policy_typo_correction_retrieves_grounded_answers(agent, message, expected_source, expected_text):
+    result = agent.respond(message)
+    assert expected_source in result.sources
+    assert expected_text in result.reply
+    assert "human colleague" not in result.reply
+
+
+def test_typo_correction_preserves_product_names(agent):
+    message = "Kya main Kaafi Running Sneakers return kar sakti hoon?"
+    assert agent.kb.correct_typos(message) == message
 
 
 def test_smoke_return_policy_is_concise_and_current(agent):
@@ -206,7 +269,7 @@ def test_human_request_during_order_prompt_creates_ticket(agent):
         )
     assert result.tool_calls == ["create_ticket()"]
     assert "created a support ticket" in result.reply
-    assert "no order was linked" in result.reply
+    assert "no order was linked" in result.reply.casefold()
 
 
 def test_multi_policy_question_retrieves_return_and_refund_evidence(agent):
@@ -225,6 +288,20 @@ def test_refund_question_without_payment_method_clarifies(agent):
     result = agent.respond("When will my refund come?")
     assert "REF-2" in result.sources
     assert "Which payment method" in result.reply
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["How do refunds work?", "Can you explain the refund process?", "What is your refund policy?"],
+)
+def test_general_refund_question_explains_initiation_and_payment_timing(agent, question):
+    result = agent.respond(question)
+    assert "initiated immediately" in result.reply
+    assert "within 2 business days after pickup" in result.reply
+    assert "original payment method" in result.reply
+    assert "Which payment method" in result.reply
+    assert {"REF-1", "REF-2", "RET-7"}.issubset(result.sources)
+    assert "human colleague" not in result.reply
 
 
 def test_high_value_damaged_catalog_item_escalates_without_order_lookup(agent):
@@ -286,12 +363,13 @@ def test_initiated_return_refund_is_not_described_as_completed(agent):
     assert "8-digit order ID" in first.reply
 
     agent.respond("My order ID is 16640894.")
-    verified = agent.respond("My phone ends in 2108.")
+    with patch("src.agent.create_ticket", return_value={"created": True, "ticket_id": "TKT"}):
+        verified = agent.respond("My phone ends in 2108.")
+        follow_up = agent.respond("I paid with UPI. When will I receive the money?")
     assert "initiated on 20 July 2026" in verified.reply
     assert "not yet been marked completed" in verified.reply
     assert "1–3 business days" in verified.reply
 
-    follow_up = agent.respond("I paid with UPI. When will I receive the money?")
     assert "initiated on 20 July 2026" in follow_up.reply
     assert "not yet been marked completed" in follow_up.reply
     assert "UPI refunds" in follow_up.reply
@@ -569,6 +647,17 @@ def test_follow_up_uses_verified_order_context(agent, known_order):
     assert "IDV-1" not in follow_up.sources
 
 
+def test_verified_order_status_accepts_state_wording(agent):
+    agent.respond("Check my order six nine five two zero eight six seven")
+    verified = agent.respond("My phone ends in zero one zero one")
+    assert "current status is shipped" in verified.reply.lower()
+
+    result = agent.respond("What is the state of the order?")
+    assert "Your order is shipped." in result.reply
+    assert "TRK-1" in result.sources
+    assert "human colleague" not in result.reply
+
+
 def test_repeating_verified_order_id_does_not_restart_verification(agent):
     agent.respond("My order is 69520867.")
     agent.respond("0101")
@@ -729,6 +818,23 @@ def test_web_empty_message_is_safe():
     assert "didn't catch" in response.json()["reply"]
 
 
+def test_web_page_revalidates_with_versioned_script():
+    response = TestClient(app).get("/")
+    assert response.headers["cache-control"] == "no-cache"
+    assert 'app.js?v=20261024-9' in response.text
+    assert 'style.css?v=20261024-9' in response.text
+
+
+def test_chat_messages_are_bottom_anchored_inside_scrollable_feed():
+    styles = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".chat-feed > :first-child { margin-top: auto; }" in styles
+    assert "overflow-y: auto" in styles
+    assert "scroll-behavior: auto" in styles
+    assert "overscroll-behavior: contain" in styles
+    assert "height: 100dvh" in styles
+    assert "grid-template-rows: minmax(0, 1fr)" in styles
+
+
 def test_web_issues_http_only_session_cookie():
     response = TestClient(app).post("/api/chat", json={"message": "Hello"})
     cookie = response.cookies.get("voiceops_session")
@@ -794,11 +900,20 @@ def test_voice_ui_exposes_required_language_codes_and_upload_limit():
         assert f'value="{language}"' in page
     assert "reply_language" in script
     assert 'id="tts-voice"' in page
-    assert "voice=" in script
+    assert "voice: document.querySelector" in script
     assert "60000" in script
     assert "60 seconds" in script
-    assert "voice-message.webm" in script
+    assert "voice-message.${extension}" in script
+    assert "'audio/webm'" in script
+    assert "I could not prepare that recording" not in script
     assert '".webm"' in (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+    composer = page.split('id="form"', 1)[1].split("</form>", 1)[0]
+    assert 'id="record"' in composer
+    assert 'type="submit"' in composer
+    assert "audio.autoplay = true" in script
+    assert "audio.play().catch" in script
+    assert "function stopSpeechPlayback()" in script
+    assert "audio.pause()" in script
 
 
 def test_voice_turn_synthesizes_retry_prompt_for_empty_transcript(monkeypatch, project_temp_dir):
