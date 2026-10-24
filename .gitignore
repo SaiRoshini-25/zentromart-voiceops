@@ -6,3 +6,5 @@ outputs/
 outputs/*
 !outputs/.gitkeep
 tools/tickets_created.csv
+.vscode/
+.sf/
