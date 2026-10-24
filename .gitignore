@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+outputs/
+*.py[cod]
+outputs/*
+!outputs/.gitkeep
+tools/tickets_created.csv
